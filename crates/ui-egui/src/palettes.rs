@@ -899,6 +899,7 @@ pub(crate) fn properties_section(app: &mut CadApp, ui: &mut egui::Ui) {
     let ids: Vec<String> = sel.iter().map(|h| h.hex()).collect();
     let mut set: Option<Value> = None;
     let mut custom_set: Option<Value> = None;
+    let mut attribute_set: Option<Value> = None;
     let group = |ui: &mut egui::Ui, title: &str| {
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
         ui.painter().rect_filled(r.shrink2(vec2(6.0, 1.0)), 2.0, t.chrome_dark);
@@ -1138,6 +1139,22 @@ pub(crate) fn properties_section(app: &mut CadApp, ui: &mut egui::Ui) {
                 prop_row(ui, "Position Z", |ui| read_only(ui, &len(i.insert.z)));
                 num(ui, "Rotation", "rotation", real(angles.shown(i.rotation).to_degrees()), &mut set, &mut bad, &ids);
                 num(ui, "Scale", "scale", real(i.scale.x), &mut set, &mut bad, &ids);
+                if !i.attribs.is_empty() {
+                    group(ui, "Attributes");
+                    for a in &i.attribs {
+                        prop_row(ui, &a.tag, |ui| {
+                            if a.constant {
+                                value_box(ui, &a.text.value, false, false).on_hover_text(crate::tl!("Read-only"));
+                            } else if let Some(value) = edit_field(ui, ui.scope_id().with(("attribute", e.handle, &a.tag)), a.text.value.clone())
+                                && value != a.text.value
+                            {
+                                let mut values = serde_json::Map::new();
+                                values.insert(a.tag.clone(), json!(value));
+                                attribute_set = Some(json!({ "handle": e.handle.hex(), "values": values }));
+                            }
+                        });
+                    }
+                }
                 if let Some((_, props)) = custom.filter(|(_, p)| !p.is_empty()) {
                     group(ui, "Custom");
                     for p in &props {
@@ -1173,6 +1190,9 @@ pub(crate) fn properties_section(app: &mut CadApp, ui: &mut egui::Ui) {
     report_bad(app, bad);
     if let Some(p) = custom_set {
         let _ = app.run("blocks.reference.set", p);
+    }
+    if let Some(p) = attribute_set {
+        let _ = app.run("attedit", p);
     }
 }
 
