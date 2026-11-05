@@ -39,8 +39,9 @@ pub fn mirror(app: &CadApp, ctx: &egui::Context) {
     }
 }
 
-/// The commands the Cut/Copy/Paste events of this frame ask for. Pasted DXF text that isn't our
-/// own last copy (another CADCraft's) becomes the clipboard first.
+/// Route clipboard events: CADCraft DXF objects use drawing paste commands; ordinary text
+/// goes into the command-line buffer, including AutoLISP expressions. Focused text widgets
+/// handle their own paste because menus::shortcuts returns before calling this function.
 pub fn shortcut_commands(app: &mut CadApp, ctx: &egui::Context) -> Vec<&'static str> {
     let (events, shift) = ctx.input(|i| {
         let ev: Vec<egui::Event> =
@@ -54,13 +55,51 @@ pub fn shortcut_commands(app: &mut CadApp, ctx: &egui::Context) -> Vec<&'static 
             egui::Event::Cut => out.push("cutclip"),
             egui::Event::Paste(text) => {
                 let h = hash(&text);
-                if ctx.data(|d| d.get_temp::<u64>(text_id())) != Some(h) && clipboard::load_system_text(&mut app.session, &text) {
-                    ctx.data_mut(|d| d.insert_temp(text_id(), h));
+                // A copy mirrored from this CAD window is already in the drawing clipboard.
+                // DXF copied from another CAD window must first be decoded.
+                let cached_cad_copy = ctx.data(|d| d.get_temp::<u64>(text_id())) == Some(h) && !app.session.clipboard.is_empty();
+                let is_cad_copy = cached_cad_copy || clipboard::load_system_text(&mut app.session, &text);
+                if is_cad_copy {
+                    if !cached_cad_copy {
+                        ctx.data_mut(|d| d.insert_temp(text_id(), h));
+                    }
+                    out.push(if shift { "pasteblock" } else { "pasteclip" });
+                } else {
+                    // The command line is painted rather than an egui text field: it has no
+                    // keyboard focus of its own. Paste ordinary text there, not as CAD objects.
+                    app.cmd.preedit.clear();
+                    app.cmd.buffer.push_str(&text);
+                    app.cmd.note_typing();
                 }
-                out.push(if shift { "pasteblock" } else { "pasteclip" });
             }
             _ => {}
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Services;
+    use cadcraft_engine::Session;
+
+    /// Ctrl+V with an AutoLISP expression must not invoke PASTECLIP on an empty CAD clipboard.
+    #[test]
+    fn plain_text_paste_goes_to_command_line() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        app.cmd.buffer = "(setq ".to_string();
+        let ctx = egui::Context::default();
+        let mut commands = Vec::new();
+        let mut output = ctx.run_ui(
+            egui::RawInput { events: vec![egui::Event::Paste("e (entlast))".into())], ..Default::default() },
+            |ui| {
+                commands = shortcut_commands(&mut app, ui.ctx());
+            },
+        );
+        output.textures_delta.clear();
+        assert!(commands.is_empty(), "plain text must not invoke CAD paste");
+        assert_eq!(app.cmd.buffer, "(setq e (entlast))");
+        assert!(app.session.clipboard.is_empty(), "text paste must not alter the drawing clipboard");
+    }
 }
