@@ -389,6 +389,34 @@ fn entnext_walks_block_attributes_and_seqend() {
     assert_eq!(s.doc().unwrap().model.len(), 2, "no synthetic subentities added to the drawing");
 }
 
+/// NODUS-002B.02: entmod edits the actual INSERT attribute value via its virtual LISP name.
+#[test]
+fn entmod_updates_block_attribute_value_only() {
+    let mut s = session();
+    let id = s.execute("attdef", &serde_json::json!({ "tag": "ID", "default": "001", "at": [0.0, 0.0], "height": 2.5 })).unwrap();
+    let room = s.execute("attdef", &serde_json::json!({ "tag": "ROOM", "default": "A01", "at": [0.0, 3.0], "height": 2.5 })).unwrap();
+    let handles = [id["handle"].as_str().unwrap(), room["handle"].as_str().unwrap()];
+    s.execute("block", &serde_json::json!({ "name": "TEST_EDIT_ATTR", "base": [0.0, 0.0], "handles": handles, "keep": "delete" })).unwrap();
+    let inserted = s.execute("insert", &serde_json::json!({ "name": "TEST_EDIT_ATTR", "at": [10.0, 10.0], "attribs": {"ID": "007", "ROOM": "B15"} })).unwrap();
+    let handle = inserted["handle"].as_str().unwrap();
+    ok(&mut s, &format!("(setq blk (handent \"{handle}\")) (setq att (entnext blk))"));
+    assert_eq!(ok(&mut s, "(cdr (assoc 2 (entget att)))"), "\"ID\"");
+    assert_eq!(ok(&mut s, "(setq data (entget att)) (if (entmod (subst (cons 1 \"009\") (assoc 1 data) data)) T nil)"), "T");
+    assert_eq!(ok(&mut s, "(cdr (assoc 1 (entget att)))"), "\"009\"");
+    assert_eq!(ok(&mut s, "(cdr (assoc 1 (entget (entnext att))))"), "\"B15\"");
+    let d = s.doc().unwrap();
+    let entity = d.entity(cadcraft_doc::Handle::parse_hex(handle).unwrap()).unwrap();
+    let cadcraft_doc::EntityKind::Insert(ins) = &entity.kind else { panic!("expected INSERT") };
+    assert_eq!(ins.attribs[0].text.value, "009");
+    assert_eq!(ins.attribs[1].text.value, "B15");
+    assert_eq!(d.model.len(), 1, "editing attributes must not create entities");
+    // The TAG, entity type, and SEQEND are not editable through this restricted path.
+    assert_eq!(ok(&mut s, "(setq data (entget att)) (entmod (subst (cons 2 \"OTHER\") (assoc 2 data) data))"), "nil");
+    assert_eq!(ok(&mut s, "(entmod (subst (cons 0 \"TEXT\") (assoc 0 data) data))"), "nil");
+    assert_eq!(ok(&mut s, "(entmod (entget (entnext (entnext att))))"), "nil");
+    assert_eq!(ok(&mut s, "(cdr (assoc 1 (entget att)))"), "\"009\"");
+}
+
 #[test]
 fn entity_lists_hold_angles_in_radians() {
     let mut s = session();

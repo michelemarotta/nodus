@@ -557,12 +557,70 @@ fn end_block(ctx: &mut Ctx<'_>) -> Value {
     Value::str(&name)
 }
 
+/// Modify only the text value of a LISP-virtual ATTRIB. The complete entget list must be
+/// supplied: rejecting changes to other groups prevents an attribute edit from silently
+/// discarding geometry, TAG or ownership changes that this implementation does not support.
+/// The backing value is the INSERT's own attribute, so the Properties palette sees the edit.
+fn entmod_attribute(ctx: &mut Ctx<'_>, list: &Value, h: Handle, owner: Handle, index: usize) -> Result<Flow, LispError> {
+    let original = attr_list(ctx, h, owner, index);
+    if original.is_nil() || !list.is_list() {
+        return Ok(Flow::Value(Value::Nil));
+    }
+    let before = original.to_vec();
+    let after = list.to_vec();
+    if before.len() != after.len() {
+        return Ok(Flow::Value(Value::Nil));
+    }
+    let mut old_value = None;
+    let mut new_value = None;
+    for (old, new) in before.iter().zip(&after) {
+        if old.car().as_number() == Some(1.0) {
+            if new.car().as_number() != Some(1.0) {
+                return Ok(Flow::Value(Value::Nil));
+            }
+            let (Value::Str(previous), Value::Str(updated)) = (old.cdr(), new.cdr()) else {
+                return Ok(Flow::Value(Value::Nil));
+            };
+            old_value = Some(previous.to_string());
+            new_value = Some(updated.to_string());
+        } else if !super::value::equal(old, new, 0.0) {
+            return Ok(Flow::Value(Value::Nil));
+        }
+    }
+    // SEQEND has no group 1 and must remain read-only.
+    let Some(value) = new_value else { return Ok(Flow::Value(Value::Nil)) };
+    if old_value.as_deref() == Some(value.as_str()) {
+        return Ok(Flow::Value(list.clone()));
+    }
+    let Ok(d) = ctx.s.doc_mut() else { return Ok(Flow::Value(Value::Nil)) };
+    let mut applied = false;
+    let ok = d
+        .modify_entity(owner, |e| {
+            if let EntityKind::Insert(ins) = &mut e.kind
+                && let Some(a) = ins.attribs.get_mut(index)
+            {
+                // Reuse ATTEDIT's value handling, including justified text baselines.
+                crate::cmd::blocks::attedit::set_value(&mut a.text, value);
+                applied = true;
+            }
+        })
+        .is_ok()
+        && applied;
+    if ok {
+        ctx.s.touch();
+    }
+    Ok(Flow::Value(if ok { list.clone() } else { Value::Nil }))
+}
+
 pub fn entmod(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
     arity(&a, 1, 1)?;
     let list = &a[0];
     let Some(Value::Ename(h)) = list.iter().find(|v| v.car().as_number() == Some(-1.0)).map(|v| v.cdr()) else {
         return Err(LispError::bad_arg("lentityp", &Value::Nil));
     };
+    if let Some(&(owner, index)) = ctx.env.attr_refs.get(&h) {
+        return entmod_attribute(ctx, list, h, owner, index);
+    }
     let Some(old) = ctx.s.doc().ok().and_then(|d| d.entity(h)).cloned() else { return Ok(Flow::Value(Value::Nil)) };
     let (kind_name, common, kind) = match entity_from_list(ctx, list) {
         Ok(x) => x,
