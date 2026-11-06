@@ -754,6 +754,20 @@ fn a_named_object_holds_for_its_own_input_in_its_own_space() {
 }
 
 #[test]
+fn findfile_searches_lisp_support_dir() {
+    let dir = std::env::temp_dir().join(format!("nodus-findfile-support-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("LL_Layer.dcl"), "ll_layer : dialog {}").unwrap();
+    let mut s = session();
+    s.set_lisp_support_dir(Some(dir.clone()));
+    let found = ok(&mut s, "(findfile \"LL_Layer.dcl\")");
+    assert!(found.contains("nodus-findfile-support-") && found.contains("LL_Layer.dcl"), "{found}");
+    assert_eq!(ok(&mut s, "(findfile \"not-present.dcl\")"), "nil");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn appload_reads_a_lsp_path_and_reports_its_commands() {
     let dir = std::env::temp_dir().join(format!("cadcraft-appload-lisp-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

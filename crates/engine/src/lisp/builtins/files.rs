@@ -1,4 +1,4 @@
-use super::args::{R, arity, string};
+use super::args::{arity, string};
 use super::output::emit;
 use super::{Ctx, Flow, LispError, Value, charge_bytes};
 
@@ -65,10 +65,22 @@ pub(super) fn write_line(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispE
     Ok(Flow::Value(Value::Str(s)))
 }
 
-pub(super) fn findfile(a: &[Value]) -> R {
-    arity(a, 1, 1)?;
+/// Find a file directly, or by its name in this session's trusted LISP support folder.
+/// Do not search beside an opened drawing (a drawing can come from an untrusted source).
+pub(super) fn findfile(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
+    arity(&a, 1, 1)?;
     let p = string(&a[0])?;
-    Ok(if file_exists(&p) { Value::Str(p) } else { Value::Nil })
+    let found = if file_exists(&p) {
+        Some(p.to_string())
+    } else if std::path::Path::new(&*p).components().count() == 1 {
+        ctx.s.lisp_support_dir()
+            .map(|dir| dir.join(&*p))
+            .filter(|candidate| candidate.is_file())
+            .map(|candidate| candidate.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+    Ok(Flow::Value(found.as_deref().map(Value::str).unwrap_or(Value::Nil)))
 }
 
 /// Read a regular text file up to 64 MiB, replacing invalid UTF-8 and returning `None` on read failure.
