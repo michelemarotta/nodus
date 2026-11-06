@@ -365,6 +365,30 @@ fn entity_lists_round_trip() {
     assert_eq!(ok(&mut s, "(handent \"ZZZZZZ\")"), "nil");
 }
 
+/// NODUS-002B: attributes inside an INSERT are exposed as LISP subentities, not new DWG entities.
+#[test]
+fn entnext_walks_block_attributes_and_seqend() {
+    let mut s = session();
+    let a = s.execute("attdef", &serde_json::json!({ "tag": "ID", "default": "001", "at": [0.0, 0.0], "height": 2.5 })).unwrap();
+    let b = s.execute("attdef", &serde_json::json!({ "tag": "ROOM", "default": "A01", "at": [0.0, 3.0], "height": 2.5 })).unwrap();
+    let handles = [a["handle"].as_str().unwrap(), b["handle"].as_str().unwrap()];
+    s.execute("block", &serde_json::json!({ "name": "TEST_ATTR", "base": [0.0, 0.0], "handles": handles, "keep": "delete" })).unwrap();
+    let inserted = s.execute("insert", &serde_json::json!({ "name": "TEST_ATTR", "at": [10.0, 10.0], "attribs": {"ID": "007", "ROOM": "B15"} })).unwrap();
+    s.execute("line", &serde_json::json!({ "points": [[0.0, 0.0], [1.0, 1.0]] })).unwrap();
+    let handle = inserted["handle"].as_str().unwrap();
+    ok(&mut s, &format!("(setq b (handent \"{handle}\"))"));
+    assert_eq!(ok(&mut s, "(cdr (assoc 0 (entget b)))"), "\"INSERT\"");
+    assert_eq!(ok(&mut s, "(setq a1 (entnext b)) (cdr (assoc 0 (entget a1)))"), "\"ATTRIB\"");
+    assert_eq!(ok(&mut s, "(cdr (assoc 2 (entget a1)))"), "\"ID\"");
+    assert_eq!(ok(&mut s, "(cdr (assoc 1 (entget a1)))"), "\"007\"");
+    assert_eq!(ok(&mut s, "(setq a2 (entnext a1)) (cdr (assoc 2 (entget a2)))"), "\"ROOM\"");
+    assert_eq!(ok(&mut s, "(cdr (assoc 1 (entget a2)))"), "\"B15\"");
+    assert_eq!(ok(&mut s, "(cdr (assoc 0 (entget (entnext a2))))"), "\"SEQEND\"");
+    assert_eq!(ok(&mut s, "(cdr (assoc 0 (entget (entnext (entnext a2)))))"), "\"LINE\"");
+    assert_eq!(ok(&mut s, "(entnext (entnext (entnext a2)))"), "nil");
+    assert_eq!(s.doc().unwrap().model.len(), 2, "no synthetic subentities added to the drawing");
+}
+
 #[test]
 fn entity_lists_hold_angles_in_radians() {
     let mut s = session();

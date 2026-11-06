@@ -9,7 +9,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use cadcraft_doc::{Entity, Handle, Space};
+use cadcraft_doc::{Entity, EntityKind, Handle, Space};
 use cadcraft_dxf::Tag;
 use cadcraft_geom::Vec2;
 
@@ -340,9 +340,82 @@ fn space_of(d: &cadcraft_doc::Drawing, h: Handle) -> Option<Space> {
     d.space_of(h)
 }
 
+/// A stable name in this drawing's LISP environment for a nested attribute (or SEQEND).
+/// Names are allocated above ordinary DXF handles and checked against real entities.
+/// They do not change CADCraft's drawing model or the file written to disk.
+fn attr_name(ctx: &mut Ctx<'_>, owner: Handle, index: usize) -> Option<Handle> {
+    let key = (owner, index);
+    if let Some(h) = ctx.env.attr_names.get(&key) {
+        return Some(*h);
+    }
+    for _ in 0..4096 {
+        let id = ctx.env.next_attr_name;
+        ctx.env.next_attr_name = id.checked_add(1)?;
+        let h = Handle(u64::MAX.checked_sub(id)?);
+        if ctx.s.doc().ok()?.entity(h).is_some() || ctx.env.attr_refs.contains_key(&h) {
+            continue;
+        }
+        ctx.env.attr_refs.insert(h, key);
+        ctx.env.attr_names.insert(key, h);
+        return Some(h);
+    }
+    None
+}
+
+/// An AutoLISP association list for an INSERT's nested ATTRIB or its trailing SEQEND.
+/// The attributes are virtual LISP subentities: nothing is added to the DWG model.
+fn attr_list(ctx: &Ctx<'_>, h: Handle, owner: Handle, index: usize) -> Value {
+    let Ok(d) = ctx.s.doc() else { return Value::Nil };
+    let Some(e) = d.entity(owner) else { return Value::Nil };
+    let EntityKind::Insert(ins) = &e.kind else { return Value::Nil };
+    if ins.attribs.is_empty() || index > ins.attribs.len() {
+        return Value::Nil;
+    }
+    let item = |code: i32, value: Value| Value::cons(Value::Int(code), value);
+    let layout = match space_of(d, owner) {
+        Some(Space::Paper(name)) => name,
+        _ => "Model".to_string(),
+    };
+    let a = ins.attribs.get(index);
+    let layer = a.and_then(|a| a.props.layer.as_deref()).unwrap_or(&e.common.layer);
+    let mut result = vec![
+        item(-1, Value::Ename(h)),
+        item(0, Value::str(if a.is_some() { "ATTRIB" } else { "SEQEND" })),
+        item(5, Value::str(&h.hex())),
+        item(330, Value::str(&owner.hex())),
+        item(100, Value::str("AcDbEntity")),
+        item(410, Value::str(&layout)),
+        item(8, Value::str(layer)),
+    ];
+    if let Some(a) = a {
+        let t = &a.text;
+        let pos = &t.insert;
+        result.extend([
+            item(100, Value::str("AcDbText")),
+            item(10, Value::point(&[pos.x, pos.y, pos.z])),
+            item(40, Value::Real(t.height)),
+            item(1, Value::str(&t.value)),
+            item(50, Value::Real(t.rotation)), // AutoLISP angles are radians
+            item(41, Value::Real(t.width_factor)),
+            item(51, Value::Real(t.oblique)),
+            item(7, Value::str(&t.style)),
+            item(100, Value::str("AcDbAttribute")),
+            item(2, Value::str(&a.tag)),
+            item(70, Value::Int(i32::from(a.invisible) | (i32::from(a.constant) << 1))),
+        ]);
+    } else {
+        // As in AutoCAD, SEQEND holds a link to the owning INSERT in DXF group -2.
+        result.push(item(-2, Value::Ename(owner)));
+    }
+    Value::list(result)
+}
+
 pub fn entget(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
     arity(&a, 1, 2)?;
     let h = ename(&a[0])?;
+    if let Some(&(owner, index)) = ctx.env.attr_refs.get(&h) {
+        return Ok(Flow::Value(attr_list(ctx, h, owner, index)));
+    }
     let Ok(d) = ctx.s.doc() else { return Ok(Flow::Value(Value::Nil)) };
     let Some(e) = d.entity(h) else { return Ok(Flow::Value(Value::Nil)) };
     let (kind, mut tags) = (codec()?.groups)(d, e);
@@ -571,14 +644,36 @@ pub fn entlast(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
 
 pub fn entnext(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
     arity(&a, 0, 1)?;
-    let order = handles_in_order(ctx);
-    let next = match a.first() {
-        None | Some(Value::Nil) => order.first().copied(),
-        Some(v) => {
-            let h = ename(v)?;
-            let i = order.partition_point(|x| *x <= h);
-            order.get(i).copied()
+    // entnext(INSERT) visits its attributes before the next top-level entity. Once the
+    // synthetic SEQEND has been reached, traversal resumes after its parent INSERT.
+    let mut after = match a.first() {
+        None | Some(Value::Nil) => None,
+        Some(v) => Some(ename(v)?),
+    };
+    if let Some(h) = after {
+        if let Some(&(owner, index)) = ctx.env.attr_refs.get(&h) {
+            let n = ctx.s.doc().ok().and_then(|d| d.entity(owner)).and_then(|e| match &e.kind {
+                EntityKind::Insert(i) => Some(i.attribs.len()),
+                _ => None,
+            });
+            let Some(n) = n.filter(|n| *n > 0 && index <= *n) else { return Ok(Flow::Value(Value::Nil)) };
+            if index < n {
+                return Ok(Flow::Value(attr_name(ctx, owner, index + 1).map(Value::Ename).unwrap_or_default()));
+            }
+            after = Some(owner); // SEQEND: return the next real entity
+        } else {
+            let has_attrs = ctx.s.doc().ok().and_then(|d| d.entity(h)).is_some_and(|e| {
+                matches!(&e.kind, EntityKind::Insert(i) if !i.attribs.is_empty())
+            });
+            if has_attrs {
+                return Ok(Flow::Value(attr_name(ctx, h, 0).map(Value::Ename).unwrap_or_default()));
+            }
         }
+    }
+    let order = handles_in_order(ctx);
+    let next = match after {
+        None => order.first().copied(),
+        Some(h) => order.get(order.partition_point(|x| *x <= h)).copied(),
     };
     Ok(Flow::Value(next.map(Value::Ename).unwrap_or_default()))
 }

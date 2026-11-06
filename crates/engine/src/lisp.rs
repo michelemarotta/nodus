@@ -56,6 +56,11 @@ pub struct Env {
     pub deleted: HashMap<Handle, (cadcraft_doc::Space, Arc<cadcraft_doc::Entity>)>,
     /// Every entity's handle in creation order, for the drawing it was taken from (`entnext`).
     pub order: Option<(usize, Arc<Vec<Handle>>)>,
+    /// LISP-only entity names for an INSERT's attributes and trailing SEQEND. These never enter
+    /// the drawing: CADCraft stores attributes inside INSERT, not as independent entities.
+    pub attr_names: HashMap<(Handle, usize), Handle>,
+    pub attr_refs: HashMap<Handle, (Handle, usize)>,
+    pub next_attr_name: u64,
     /// `tblnext`'s place in each table.
     pub tblnext: HashMap<String, usize>,
     /// A block definition `entmake` has begun (a BLOCK list) and not yet ended (ENDBLK): the
@@ -77,6 +82,9 @@ impl Default for Env {
             next_file: 1,
             deleted: HashMap::new(),
             order: None,
+            attr_names: HashMap::new(),
+            attr_refs: HashMap::new(),
+            next_attr_name: 0,
             tblnext: HashMap::new(),
             pending_block: None,
             printed_at: None,
