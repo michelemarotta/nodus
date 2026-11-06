@@ -140,7 +140,7 @@ fn edit(s: &mut Session, (h, k): (Handle, usize), f: impl FnOnce(&str) -> Option
 /// Refresh the derived baseline after a value change, even one within the writer's
 /// imported-font tolerance. Equal XY points request recomputation on export; retain
 /// both elevations and the independent endpoints used by Aligned/Fit text.
-fn set_value(text: &mut Text, value: String) {
+pub(crate) fn set_value(text: &mut Text, value: String) {
     if text.value == value {
         return;
     }
